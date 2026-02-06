@@ -1,0 +1,54 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          script_stop: true
+          script: |
+            set -e
+            cd /home/beingmomen-ai/htdocs/ai.beingmomen.com
+
+            echo "==> Pulling latest code..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "==> Building Docker image..."
+            docker compose -f docker-compose.prod.yml build --no-cache
+
+            echo "==> Restarting container..."
+            docker compose -f docker-compose.prod.yml down || true
+            docker compose -f docker-compose.prod.yml up -d
+
+            echo "==> Waiting for startup..."
+            sleep 10
+
+            echo "==> Health check..."
+            curl -sf http://127.0.0.1:9514/health || {
+              echo "FAILED! Showing logs:"
+              docker compose -f docker-compose.prod.yml logs --tail=50
+              exit 1
+            }
+
+            echo "==> Cleaning old images..."
+            docker image prune -f
+
+            echo "==> Done!"

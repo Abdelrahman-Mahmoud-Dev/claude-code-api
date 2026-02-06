@@ -14,17 +14,20 @@ ENV PATH="/root/.local/bin:${PATH}"
 # Note: Claude Code CLI is bundled with claude-agent-sdk >= 0.1.8
 # No separate Node.js/npm installation required
 
+# Set default port (override via -e PORT=9514)
+ENV PORT=8000
+
 # Copy the app code
 COPY . /app
 
 # Set working directory
 WORKDIR /app
 
-# Install Python dependencies with Poetry
-RUN poetry install --no-root
+# Install Python dependencies with Poetry (no dev dependencies for production)
+RUN poetry install --no-root --without dev
 
-# Expose the port (default 8000)
-EXPOSE 8000
+# Expose the port
+EXPOSE ${PORT}
 
-# Run the app with Uvicorn (development mode with reload; switch to --no-reload for prod)
-CMD ["poetry", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Run the app with Uvicorn in production mode
+CMD poetry run uvicorn src.main:app --host 0.0.0.0 --port $PORT --workers 2 --access-log

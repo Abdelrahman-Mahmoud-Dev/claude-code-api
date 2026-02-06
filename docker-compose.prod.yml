@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  claude-wrapper:
+    build: .
+    container_name: claude-code-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9514:9514"
+    env_file:
+      - .env
+    environment:
+      - PORT=9514
+    volumes:
+      - ~/.claude:/root/.claude
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9514/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
