@@ -38,6 +38,8 @@ from src.models import (
     AnthropicMessagesResponse,
     AnthropicTextBlock,
     AnthropicUsage,
+    # Active connections models
+    ConnectionsResponse,
 )
 from src.claude_cli import ClaudeCodeCLI
 from src.message_adapter import MessageAdapter
@@ -52,6 +54,7 @@ from src.rate_limiter import (
     rate_limit_endpoint,
 )
 from src.constants import CLAUDE_MODELS, CLAUDE_TOOLS, DEFAULT_ALLOWED_TOOLS
+from src.connection_tracker import connection_tracker
 
 # Load environment variables
 load_dotenv()
@@ -259,7 +262,52 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class ConnectionTrackingMiddleware(BaseHTTPMiddleware):
+    """Track active connections for live monitoring."""
+
+    # Skip tracking for monitoring/static endpoints to avoid noise
+    SKIP_PATHS = {"/health", "/version", "/docs", "/redoc", "/openapi.json",
+                  "/v1/connections/active", "/v1/connections/stream", "/dashboard", "/"}
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path in self.SKIP_PATHS or path.startswith("/v1/connections"):
+            return await call_next(request)
+
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+        client_ip = request.client.host if request.client else "unknown"
+
+        # Try to extract model from request body for POST endpoints
+        model = None
+        if request.method == "POST" and path in ("/v1/chat/completions", "/v1/messages"):
+            try:
+                body = await request.body()
+                if body:
+                    parsed = json.loads(body.decode())
+                    model = parsed.get("model")
+            except Exception:
+                pass
+
+        connection_tracker.start_request(
+            request_id=request_id,
+            client_ip=client_ip,
+            endpoint=path,
+            method=request.method,
+            model=model,
+        )
+
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            connection_tracker.end_request(request_id, status_code)
+
+
 # Add security middleware (order matters - first added = last executed)
+# Execution order: Debug → SizeLimit → ConnectionTracking → RequestID → endpoint
+app.add_middleware(ConnectionTrackingMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestSizeLimitMiddleware)
 
@@ -1380,6 +1428,61 @@ async def root():
                 </div>
             </article>
 
+            <!-- Active Connections (Live) -->
+            <article id="live-connections-card">
+                <div class="status-flex">
+                    <div class="status-left">
+                        <span id="live-dot" class="status-dot" style="background-color: #64748b;"></span>
+                        <strong>Active Connections: <span id="live-count">0</span></strong>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.75rem;">
+                        <span id="live-today" class="auth-badge">Today: 0</span>
+                        <a href="/dashboard" class="auth-badge" style="text-decoration:none;color:var(--accent-color);">Dashboard &rarr;</a>
+                    </div>
+                </div>
+            </article>
+
+            <script>
+                (function() {{
+                    const countEl = document.getElementById('live-count');
+                    const dotEl = document.getElementById('live-dot');
+                    const todayEl = document.getElementById('live-today');
+                    let es;
+
+                    function connectSSE() {{
+                        es = new EventSource('/v1/connections/stream');
+                        es.onmessage = function(e) {{
+                            try {{
+                                const data = JSON.parse(e.data);
+                                let count = 0;
+                                let today = 0;
+
+                                if (data.event === 'initial' || data.event === 'heartbeat') {{
+                                    count = data.stats.active_count || 0;
+                                    today = data.stats.total_today || 0;
+                                }} else if (data.active_count !== undefined) {{
+                                    count = data.active_count;
+                                }}
+
+                                if (data.stats && data.stats.total_today !== undefined) {{
+                                    today = data.stats.total_today;
+                                }}
+
+                                countEl.textContent = count;
+                                todayEl.textContent = 'Today: ' + today;
+                                dotEl.style.backgroundColor = count > 0 ? '#22c55e' : '#64748b';
+                                dotEl.style.animation = count > 0 ? 'pulse 2s infinite' : 'none';
+                            }} catch(err) {{}}
+                        }};
+                        es.onerror = function() {{
+                            es.close();
+                            setTimeout(connectSSE, 3000);
+                        }};
+                    }}
+                    connectSSE();
+                }})();
+            </script>
+
             <!-- Quick Start -->
             <article>
                 <div class="section-header">
@@ -1529,6 +1632,385 @@ async def root():
     </html>
     """
     return HTMLResponse(content=html_content)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Live monitoring dashboard page."""
+    from src import __version__
+
+    dashboard_html = """
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl" data-theme="dark">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <title>Dashboard - Claude Code API</title>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+        <style>
+            :root { --accent-color: #16a34a; }
+            [data-theme="light"] {
+                --card-bg: #ffffff; --subtle-bg: #f1f5f9;
+                --border-color: #e2e8f0; --page-bg: #f8fafc;
+            }
+            [data-theme="dark"] {
+                --card-bg: #1e293b; --subtle-bg: #334155;
+                --border-color: #475569; --page-bg: #0f172a;
+            }
+            body { background: var(--page-bg); }
+            .container { max-width: 1200px; margin: 0 auto; padding: 1.5rem 2rem; }
+            article {
+                background: var(--card-bg); border: 1px solid var(--border-color);
+                border-radius: 0.75rem; margin-bottom: 1rem; padding: 1rem 1.25rem;
+            }
+            code:not(pre code) {
+                background: transparent !important; padding: 0 !important;
+                border-radius: 0 !important; color: inherit !important;
+            }
+            .green-code { color: var(--accent-color) !important; }
+            .stats-grid {
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 1rem; margin-bottom: 1rem;
+            }
+            .stat-card {
+                padding: 1.25rem; background: var(--subtle-bg);
+                border: 1px solid var(--border-color); border-radius: 0.75rem;
+                text-align: center;
+            }
+            .stat-number {
+                font-size: 2.5rem; font-weight: 700; line-height: 1;
+                color: var(--accent-color);
+            }
+            .stat-label { font-size: 0.85rem; color: var(--pico-muted-color); margin-top: 0.5rem; }
+            .status-dot {
+                width: 0.75rem; height: 0.75rem; border-radius: 50%;
+                display: inline-block;
+            }
+            @keyframes pulse {
+                0%, 100% { opacity: 1; } 50% { opacity: 0.5; }
+            }
+            .badge {
+                display: inline-block; padding: 0.2rem 0.5rem; font-size: 0.7rem;
+                font-weight: 700; border-radius: 0.25rem; text-transform: uppercase;
+            }
+            .badge-active { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+            .badge-done { background: rgba(100, 116, 139, 0.15); color: #64748b; }
+            .badge-post { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+            .badge-get { background: rgba(59, 130, 246, 0.15); color: #2563eb; }
+            table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+            th { text-align: right; font-weight: 600; padding: 0.75rem 0.5rem;
+                 border-bottom: 2px solid var(--border-color); }
+            td { padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border-color); }
+            tr:last-child td { border-bottom: none; }
+            .section-header {
+                display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;
+            }
+            .section-icon { width: 1rem; height: 1rem; color: var(--accent-color); flex-shrink: 0; }
+            .header-flex {
+                display: flex; justify-content: space-between; align-items: center;
+                gap: 1rem; margin-bottom: 1rem;
+            }
+            .header-left { display: flex; align-items: center; gap: 1rem; }
+            .icon-btn {
+                padding: 0.5rem; border-radius: 0.5rem; background: var(--subtle-bg);
+                border: 1px solid var(--border-color); cursor: pointer;
+                display: inline-flex; align-items: center; justify-content: center; color: inherit;
+            }
+            .icon-btn:hover { opacity: 0.8; }
+            .icon-btn svg { width: 1.25rem; height: 1.25rem; }
+            .empty-state {
+                text-align: center; padding: 2rem; color: var(--pico-muted-color);
+                font-style: italic;
+            }
+            .ip-cell { font-family: monospace; font-size: 0.8rem; }
+            .duration-cell { font-family: monospace; }
+            .model-cell { font-size: 0.8rem; }
+            .hidden { display: none !important; }
+            .version-badge {
+                padding: 0.25rem 0.75rem; background: var(--subtle-bg);
+                border: 1px solid var(--border-color); border-radius: 0.5rem;
+                font-family: monospace; font-size: 0.875rem;
+            }
+            .status-badge {
+                display: inline-block; padding: 0.15rem 0.4rem; font-size: 0.7rem;
+                border-radius: 0.25rem; font-weight: 600;
+            }
+            .status-2xx { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+            .status-4xx { background: rgba(234, 179, 8, 0.15); color: #ca8a04; }
+            .status-5xx { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        </style>
+    </head>
+    <body>
+        <main class="container">
+            <header class="header-flex">
+                <div class="header-left">
+                    <div>
+                        <h1 style="margin:0;">Live Dashboard</h1>
+                        <p style="margin:0;color:var(--pico-muted-color);">Claude Code API - Real-time Monitoring</p>
+                    </div>
+                </div>
+                <div style="display:flex;align-items:center;gap:0.75rem;">
+                    <span class="version-badge">v""" + __version__ + """</span>
+                    <a href="/" class="icon-btn" title="Back to Home">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+                        </svg>
+                    </a>
+                    <button onclick="toggleTheme()" class="icon-btn" title="Toggle theme">
+                        <svg id="sun-icon" class="hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+                        </svg>
+                        <svg id="moon-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number" id="stat-active">0</div>
+                    <div class="stat-label">Active Now</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="stat-today">0</div>
+                    <div class="stat-label">Total Today</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="stat-avg">0s</div>
+                    <div class="stat-label">Avg Duration</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="stat-recent">0</div>
+                    <div class="stat-label">Recent Completed</div>
+                </div>
+            </div>
+
+            <!-- Active Connections -->
+            <article>
+                <div class="section-header">
+                    <span id="active-dot" class="status-dot" style="background-color: #64748b;"></span>
+                    <strong>Active Connections</strong>
+                    <span id="active-badge" class="badge badge-done" style="margin-right:auto;">0</span>
+                </div>
+                <div id="active-table-container">
+                    <div class="empty-state" id="active-empty">No active connections</div>
+                    <table id="active-table" class="hidden">
+                        <thead>
+                            <tr>
+                                <th>Endpoint</th>
+                                <th>Method</th>
+                                <th>Model</th>
+                                <th>IP</th>
+                                <th>Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody id="active-body"></tbody>
+                    </table>
+                </div>
+            </article>
+
+            <!-- Recent Completed -->
+            <article>
+                <div class="section-header">
+                    <svg class="section-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    <strong>Recent Requests</strong>
+                </div>
+                <div id="recent-table-container">
+                    <div class="empty-state" id="recent-empty">No recent requests</div>
+                    <table id="recent-table" class="hidden">
+                        <thead>
+                            <tr>
+                                <th>Endpoint</th>
+                                <th>Method</th>
+                                <th>Model</th>
+                                <th>IP</th>
+                                <th>Status</th>
+                                <th>Duration</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-body"></tbody>
+                    </table>
+                </div>
+            </article>
+        </main>
+
+        <script>
+            // Theme toggle
+            function toggleTheme() {
+                const html = document.documentElement;
+                const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+                html.setAttribute('data-theme', next);
+                localStorage.setItem('theme', next);
+                document.getElementById('sun-icon').classList.toggle('hidden', next === 'dark');
+                document.getElementById('moon-icon').classList.toggle('hidden', next !== 'dark');
+            }
+            (function() {
+                const saved = localStorage.getItem('theme');
+                if (saved) {
+                    document.documentElement.setAttribute('data-theme', saved);
+                    document.getElementById('sun-icon').classList.toggle('hidden', saved === 'dark');
+                    document.getElementById('moon-icon').classList.toggle('hidden', saved !== 'dark');
+                }
+            })();
+
+            // DOM refs
+            const statActive = document.getElementById('stat-active');
+            const statToday = document.getElementById('stat-today');
+            const statAvg = document.getElementById('stat-avg');
+            const statRecent = document.getElementById('stat-recent');
+            const activeDot = document.getElementById('active-dot');
+            const activeBadge = document.getElementById('active-badge');
+            const activeTable = document.getElementById('active-table');
+            const activeBody = document.getElementById('active-body');
+            const activeEmpty = document.getElementById('active-empty');
+            const recentTable = document.getElementById('recent-table');
+            const recentBody = document.getElementById('recent-body');
+            const recentEmpty = document.getElementById('recent-empty');
+
+            let activeConnections = [];
+            let recentCompleted = [];
+
+            function statusBadgeClass(code) {
+                if (code >= 200 && code < 300) return 'status-2xx';
+                if (code >= 400 && code < 500) return 'status-4xx';
+                return 'status-5xx';
+            }
+
+            function methodBadge(method) {
+                const cls = method === 'POST' ? 'badge-post' : 'badge-get';
+                return '<span class="badge ' + cls + '">' + method + '</span>';
+            }
+
+            function formatDuration(seconds) {
+                if (seconds < 1) return (seconds * 1000).toFixed(0) + 'ms';
+                if (seconds < 60) return seconds.toFixed(1) + 's';
+                return (seconds / 60).toFixed(1) + 'm';
+            }
+
+            function timeAgo(isoStr) {
+                const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+                if (diff < 5) return 'just now';
+                if (diff < 60) return Math.floor(diff) + 's ago';
+                if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+                return Math.floor(diff / 3600) + 'h ago';
+            }
+
+            function updateStats(stats) {
+                statActive.textContent = stats.active_count || 0;
+                statToday.textContent = stats.total_today || 0;
+                statAvg.textContent = formatDuration(stats.avg_duration_seconds || 0);
+                statRecent.textContent = stats.recent_completed || 0;
+
+                const count = stats.active_count || 0;
+                activeDot.style.backgroundColor = count > 0 ? '#22c55e' : '#64748b';
+                activeDot.style.animation = count > 0 ? 'pulse 2s infinite' : 'none';
+                activeBadge.textContent = count;
+                activeBadge.className = count > 0 ? 'badge badge-active' : 'badge badge-done';
+            }
+
+            function renderActive() {
+                if (activeConnections.length === 0) {
+                    activeTable.classList.add('hidden');
+                    activeEmpty.classList.remove('hidden');
+                    return;
+                }
+                activeEmpty.classList.add('hidden');
+                activeTable.classList.remove('hidden');
+
+                activeBody.innerHTML = activeConnections.map(c =>
+                    '<tr>' +
+                    '<td><code>' + c.endpoint + '</code></td>' +
+                    '<td>' + methodBadge(c.method) + '</td>' +
+                    '<td class="model-cell">' + (c.model || '-') + '</td>' +
+                    '<td class="ip-cell">' + c.client_ip + '</td>' +
+                    '<td class="duration-cell">' + formatDuration(c.duration_seconds) + '</td>' +
+                    '</tr>'
+                ).join('');
+            }
+
+            function renderRecent() {
+                if (recentCompleted.length === 0) {
+                    recentTable.classList.add('hidden');
+                    recentEmpty.classList.remove('hidden');
+                    return;
+                }
+                recentEmpty.classList.add('hidden');
+                recentTable.classList.remove('hidden');
+
+                recentBody.innerHTML = recentCompleted.slice(0, 30).map(c =>
+                    '<tr>' +
+                    '<td><code>' + c.endpoint + '</code></td>' +
+                    '<td>' + methodBadge(c.method) + '</td>' +
+                    '<td class="model-cell">' + (c.model || '-') + '</td>' +
+                    '<td class="ip-cell">' + c.client_ip + '</td>' +
+                    '<td><span class="status-badge ' + statusBadgeClass(c.status_code) + '">' + c.status_code + '</span></td>' +
+                    '<td class="duration-cell">' + formatDuration(c.duration_seconds) + '</td>' +
+                    '<td>' + timeAgo(c.completed_at) + '</td>' +
+                    '</tr>'
+                ).join('');
+            }
+
+            // Update active durations every second
+            setInterval(function() {
+                activeConnections.forEach(function(c) {
+                    c.duration_seconds = (Date.now() - new Date(c.started_at).getTime()) / 1000;
+                });
+                if (activeConnections.length > 0) renderActive();
+            }, 1000);
+
+            // SSE connection
+            function connectSSE() {
+                const es = new EventSource('/v1/connections/stream');
+                es.onmessage = function(e) {
+                    try {
+                        const data = JSON.parse(e.data);
+
+                        if (data.event === 'initial') {
+                            activeConnections = data.active_connections || [];
+                            updateStats(data.stats);
+                            renderActive();
+                            // Load recent via API on init
+                            fetch('/v1/connections/active')
+                                .then(r => r.json())
+                                .then(d => { recentCompleted = d.recent_completed || []; renderRecent(); })
+                                .catch(() => {});
+                        } else if (data.event === 'heartbeat') {
+                            updateStats(data.stats);
+                        } else if (data.event === 'request_started') {
+                            activeConnections.push(data.data);
+                            updateStats({ active_count: data.active_count, total_today: data.data ? undefined : 0 });
+                            renderActive();
+                            // Update today count
+                            fetch('/v1/connections/active')
+                                .then(r => r.json())
+                                .then(d => { statToday.textContent = d.stats.total_today || 0; })
+                                .catch(() => {});
+                        } else if (data.event === 'request_completed') {
+                            activeConnections = activeConnections.filter(c => c.request_id !== data.data.request_id);
+                            recentCompleted.unshift(data.data);
+                            if (recentCompleted.length > 50) recentCompleted = recentCompleted.slice(0, 50);
+                            updateStats({ active_count: data.active_count, total_today: parseInt(statToday.textContent) });
+                            statRecent.textContent = recentCompleted.length;
+                            renderActive();
+                            renderRecent();
+                        }
+                    } catch(err) { console.error('SSE parse error:', err); }
+                };
+                es.onerror = function() {
+                    es.close();
+                    setTimeout(connectSSE, 3000);
+                };
+            }
+            connectSSE();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=dashboard_html)
 
 
 @app.post("/v1/debug/request")
@@ -1905,6 +2387,70 @@ async def get_mcp_stats(
     """Get statistics about MCP connections."""
     await verify_api_key(request, credentials)
     return mcp_client.get_stats()
+
+
+# ============================================================================
+# Active Connections Monitoring Endpoints
+# ============================================================================
+
+
+@app.get("/v1/connections/active")
+@rate_limit_endpoint("general")
+async def get_active_connections(request: Request):
+    """Get all currently active API connections and recent history."""
+
+    active = connection_tracker.get_active()
+    recent = connection_tracker.get_recent()
+    stats = connection_tracker.get_stats()
+
+    return {
+        "active_connections": active,
+        "total_active": stats["active_count"],
+        "recent_completed": recent,
+        "stats": stats,
+    }
+
+
+@app.get("/v1/connections/stream")
+async def stream_connections(request: Request):
+    """SSE endpoint for live connection monitoring updates."""
+    queue = connection_tracker.subscribe()
+
+    async def event_generator():
+        try:
+            # Send initial state
+            stats = connection_tracker.get_stats()
+            active = connection_tracker.get_active()
+            initial = json.dumps({
+                "event": "initial",
+                "active_connections": active,
+                "stats": stats,
+            })
+            yield f"data: {initial}\n\n"
+
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {message}\n\n"
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    stats = connection_tracker.get_stats()
+                    heartbeat = json.dumps({"event": "heartbeat", "stats": stats})
+                    yield f"data: {heartbeat}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            connection_tracker.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.exception_handler(HTTPException)

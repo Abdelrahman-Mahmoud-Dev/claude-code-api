@@ -477,3 +477,43 @@ class AnthropicMessagesResponse(BaseModel):
     stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence"]] = "end_turn"
     stop_sequence: Optional[str] = None
     usage: AnthropicUsage
+
+
+# ============================================================================
+# Active Connections Monitoring Models
+# ============================================================================
+
+
+class ActiveConnectionInfo(BaseModel):
+    """Information about a currently active API request."""
+
+    request_id: str
+    client_ip: str
+    endpoint: str
+    method: str
+    model: Optional[str] = None
+    started_at: str
+    duration_seconds: float
+
+
+class CompletedConnectionInfo(BaseModel):
+    """Information about a recently completed API request."""
+
+    request_id: str
+    client_ip: str
+    endpoint: str
+    method: str
+    model: Optional[str] = None
+    started_at: str
+    completed_at: str
+    status_code: int
+    duration_seconds: float
+
+
+class ConnectionsResponse(BaseModel):
+    """Response for active connections endpoint."""
+
+    active_connections: List[ActiveConnectionInfo]
+    total_active: int
+    recent_completed: List[CompletedConnectionInfo]
+    stats: Dict[str, Any]

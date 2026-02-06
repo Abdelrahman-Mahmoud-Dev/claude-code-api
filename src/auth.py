@@ -235,8 +235,8 @@ async def verify_api_key(
     # Get the active API key (environment or runtime-generated)
     active_api_key = auth_manager.get_api_key()
 
-    # If no API key is configured, allow all requests
-    if not active_api_key:
+    # If no API key is configured or explicitly skipped, allow all requests
+    if not active_api_key or active_api_key.lower() in ("skip", "none", "disable", "false"):
         return True
 
     # Get credentials from Authorization header
