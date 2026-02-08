@@ -266,8 +266,17 @@ class ConnectionTrackingMiddleware(BaseHTTPMiddleware):
     """Track active connections for live monitoring."""
 
     # Skip tracking for monitoring/static endpoints to avoid noise
-    SKIP_PATHS = {"/health", "/version", "/docs", "/redoc", "/openapi.json",
-                  "/v1/connections/active", "/v1/connections/stream", "/dashboard", "/"}
+    SKIP_PATHS = {
+        "/health",
+        "/version",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/v1/connections/active",
+        "/v1/connections/stream",
+        "/dashboard",
+        "/",
+    }
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -1639,7 +1648,8 @@ async def dashboard():
     """Live monitoring dashboard page."""
     from src import __version__
 
-    dashboard_html = """
+    dashboard_html = (
+        """
     <!DOCTYPE html>
     <html lang="ar" dir="rtl" data-theme="dark">
     <head>
@@ -1751,7 +1761,9 @@ async def dashboard():
                     </div>
                 </div>
                 <div style="display:flex;align-items:center;gap:0.75rem;">
-                    <span class="version-badge">v""" + __version__ + """</span>
+                    <span class="version-badge">v"""
+        + __version__
+        + """</span>
                     <a href="/" class="icon-btn" title="Back to Home">
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
@@ -2010,6 +2022,7 @@ async def dashboard():
     </body>
     </html>
     """
+    )
     return HTMLResponse(content=dashboard_html)
 
 
@@ -2421,11 +2434,13 @@ async def stream_connections(request: Request):
             # Send initial state
             stats = connection_tracker.get_stats()
             active = connection_tracker.get_active()
-            initial = json.dumps({
-                "event": "initial",
-                "active_connections": active,
-                "stats": stats,
-            })
+            initial = json.dumps(
+                {
+                    "event": "initial",
+                    "active_connections": active,
+                    "stats": stats,
+                }
+            )
             yield f"data: {initial}\n\n"
 
             while True:
