@@ -817,3 +817,20 @@ MIT Licence
 Contributions are welcome! Please open an issue or submit a pull request.
 
 API_KEY=skip PORT=8000 .venv/bin/python -m src.main
+
+أو لو عايز أمر واحد مختصر: RESTART
+
+docker compose -f docker-compose.prod.yml up -d --build
+بعدها تأكد إنه شغال:
+
+# check status
+
+docker ps
+
+# health check
+
+curl http://127.0.0.1:9514/health
+
+# لو فيه مشكلة، شوف الـ logs
+
+docker compose -f docker-compose.prod.yml logs --tail=50
