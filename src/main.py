@@ -1,10 +1,12 @@
 import os
+import re
 import json
 import asyncio
 import logging
 import secrets
 import string
 import uuid
+from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -15,6 +17,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from dotenv import load_dotenv
+import markdown as md_lib
 
 from src.models import (
     ChatCompletionRequest,
@@ -58,6 +61,9 @@ from src.connection_tracker import connection_tracker
 
 # Load environment variables
 load_dotenv()
+
+# Project root directory (for serving markdown files)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Configure logging based on debug mode
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "yes", "on")
@@ -2466,6 +2472,185 @@ async def stream_connections(request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ==================== Markdown File Serving ====================
+
+
+def detect_rtl(text: str) -> bool:
+    """Detect if text is predominantly RTL (Arabic/Hebrew)."""
+    sample = text[:1000]
+    arabic_chars = len(re.findall(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", sample))
+    total_chars = len(re.findall(r"\S", sample))
+    if total_chars == 0:
+        return False
+    return (arabic_chars / total_chars) > 0.2
+
+
+def render_markdown_page(title: str, html_body: str, is_rtl: bool) -> str:
+    """Render markdown HTML body into a full styled page."""
+    lang = "ar" if is_rtl else "en"
+    dir_attr = ' dir="rtl"' if is_rtl else ""
+    text_align = "right" if is_rtl else "left"
+    border_side = "right" if is_rtl else "left"
+
+    return f"""<!DOCTYPE html>
+<html lang="{lang}"{dir_attr} data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>{title} - Claude Code API</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        :root {{ --accent-color: #16a34a; }}
+        [data-theme="light"] {{
+            --card-bg: #ffffff; --subtle-bg: #f1f5f9;
+            --border-color: #e2e8f0; --page-bg: #f8fafc;
+        }}
+        [data-theme="dark"] {{
+            --card-bg: #1e293b; --subtle-bg: #334155;
+            --border-color: #475569; --page-bg: #0f172a;
+        }}
+        body {{ background: var(--page-bg); }}
+        .container {{ max-width: 900px; margin: 0 auto; padding: 1.5rem 2rem; }}
+        article {{
+            background: var(--card-bg); border: 1px solid var(--border-color);
+            border-radius: 0.75rem; margin-bottom: 1rem; padding: 2rem 2.5rem;
+        }}
+        .header-flex {{
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 1rem; margin-bottom: 1rem;
+        }}
+        .icon-btn {{
+            padding: 0.5rem; border-radius: 0.5rem; background: var(--subtle-bg);
+            border: 1px solid var(--border-color); cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center; color: inherit;
+        }}
+        .icon-btn:hover {{ opacity: 0.8; }}
+        .icon-btn svg {{ width: 1.25rem; height: 1.25rem; }}
+        .hidden {{ display: none !important; }}
+        .back-link {{
+            text-decoration: none; color: var(--accent-color);
+            font-size: 0.9rem; display: inline-flex; align-items: center; gap: 0.25rem;
+        }}
+        .md-content h1 {{ font-size: 1.75rem; margin-top: 2rem; margin-bottom: 1rem; }}
+        .md-content h2 {{
+            font-size: 1.4rem; margin-top: 1.75rem; margin-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem;
+        }}
+        .md-content h3 {{ font-size: 1.15rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }}
+        .md-content table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; margin: 1rem 0; }}
+        .md-content th {{
+            text-align: {text_align}; font-weight: 600;
+            padding: 0.75rem 0.5rem; border-bottom: 2px solid var(--border-color);
+        }}
+        .md-content td {{ padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border-color); }}
+        .md-content tr:last-child td {{ border-bottom: none; }}
+        .md-content pre {{ position: relative; margin: 1rem 0; }}
+        .md-content code:not(pre code) {{
+            background: var(--subtle-bg); padding: 0.15rem 0.4rem;
+            border-radius: 0.25rem; font-size: 0.875em;
+        }}
+        .md-content .shiki {{ padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }}
+        .md-content .shiki code {{ background: transparent !important; padding: 0 !important; }}
+        .md-content blockquote {{
+            border-{border_side}: 3px solid var(--accent-color);
+            padding: 0.5rem 1rem; margin: 1rem 0;
+            background: var(--subtle-bg); border-radius: 0 0.5rem 0.5rem 0;
+        }}
+        .md-content img {{ max-width: 100%; height: auto; border-radius: 0.5rem; }}
+        .md-content a {{ color: var(--accent-color); }}
+        .md-content hr {{ border: none; border-top: 1px solid var(--border-color); margin: 1.5rem 0; }}
+    </style>
+    <script>
+        function toggleTheme() {{
+            const html = document.documentElement;
+            const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            updateThemeIcon(next === 'dark');
+            location.reload();
+        }}
+        function updateThemeIcon(isDark) {{
+            document.getElementById('sun-icon').classList.toggle('hidden', isDark);
+            document.getElementById('moon-icon').classList.toggle('hidden', !isDark);
+        }}
+        document.addEventListener('DOMContentLoaded', () => {{
+            const saved = localStorage.getItem('theme');
+            if (saved) {{
+                document.documentElement.setAttribute('data-theme', saved);
+                updateThemeIcon(saved === 'dark');
+            }} else {{ updateThemeIcon(true); }}
+        }});
+    </script>
+</head>
+<body>
+    <main class="container">
+        <header class="header-flex">
+            <a href="/" class="back-link">&larr; Home</a>
+            <button onclick="toggleTheme()" class="icon-btn" title="Toggle theme">
+                <svg id="sun-icon" class="hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+                </svg>
+                <svg id="moon-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+                </svg>
+            </button>
+        </header>
+        <article>
+            <div class="md-content">{html_body}</div>
+        </article>
+    </main>
+    <script type="module">
+        import {{ codeToHtml }} from 'https://esm.sh/shiki@3.0.0';
+        const theme = document.documentElement.getAttribute('data-theme') === 'dark'
+            ? 'github-dark' : 'github-light';
+        for (const block of document.querySelectorAll('pre code')) {{
+            const code = block.textContent;
+            const langMatch = block.className.match(/language-(\\w+)/);
+            const lang = langMatch ? langMatch[1] : 'text';
+            try {{
+                const html = await codeToHtml(code, {{ lang, theme }});
+                block.parentElement.outerHTML = html;
+            }} catch {{
+                try {{
+                    const html = await codeToHtml(code, {{ lang: 'text', theme }});
+                    block.parentElement.outerHTML = html;
+                }} catch {{}}
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+
+
+@app.get("/{filename:path}", response_class=HTMLResponse)
+async def serve_markdown(filename: str):
+    """Serve markdown files from the project root as rendered HTML pages."""
+    safe_name = Path(filename).name
+
+    if safe_name != filename or not safe_name.endswith(".md"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    file_path = (PROJECT_ROOT / safe_name).resolve()
+    if not str(file_path).startswith(str(PROJECT_ROOT)) or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    md_text = file_path.read_text(encoding="utf-8")
+    is_rtl = detect_rtl(md_text)
+
+    html_body = md_lib.markdown(
+        md_text,
+        extensions=["fenced_code", "tables", "toc", "attr_list", "md_in_html"],
+    )
+
+    title_match = re.search(r"^#\s+(.+)$", md_text, re.MULTILINE)
+    title = title_match.group(1) if title_match else safe_name
+
+    return HTMLResponse(content=render_markdown_page(title, html_body, is_rtl))
 
 
 @app.exception_handler(HTTPException)
