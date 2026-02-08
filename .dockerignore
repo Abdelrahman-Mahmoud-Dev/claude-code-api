@@ -13,3 +13,6 @@ examples
 tests
 *.md
 !README.md
+!API_USAGE_GUIDE.md
+!API_INTEGRATION_GUIDE.md
+!DEPLOYMENT_GUIDE.md
