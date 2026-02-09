@@ -927,13 +927,31 @@ async def anthropic_messages(
 _models_cache: Dict[str, Any] = {"data": None, "expires_at": 0.0}
 
 
+def _get_cli_oauth_token() -> Optional[str]:
+    """Extract OAuth access token from Claude CLI credentials file."""
+    try:
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if not creds_path.exists():
+            return None
+        with open(creds_path, "r") as f:
+            creds = json.load(f)
+        token = creds.get("claudeAiOauth", {}).get("accessToken")
+        if token:
+            logger.debug("Using CLI OAuth token for models fetch")
+        return token
+    except Exception as e:
+        logger.debug(f"Could not read CLI credentials: {e}")
+        return None
+
+
 async def _fetch_anthropic_models() -> Optional[list]:
-    """Fetch models from Anthropic API. Returns None on failure or if no API key."""
+    """Fetch models from Anthropic API. Uses ANTHROPIC_API_KEY or CLI OAuth token."""
     # Check cache first
     if _models_cache["data"] and time.time() < _models_cache["expires_at"]:
         return _models_cache["data"]
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    # Priority: ANTHROPIC_API_KEY env var > CLI OAuth token
+    api_key = os.getenv("ANTHROPIC_API_KEY") or _get_cli_oauth_token()
     if not api_key:
         return None
 
@@ -981,7 +999,7 @@ async def _fetch_anthropic_models() -> Optional[list]:
 async def list_models(
     request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ):
-    """List available models. Fetches dynamically from Anthropic API if ANTHROPIC_API_KEY is set, otherwise uses static list."""
+    """List available models. Fetches dynamically from Anthropic API using API key or CLI OAuth token, otherwise uses static list."""
     # Check FastAPI API key if configured
     await verify_api_key(request, credentials)
 
