@@ -1,14 +1,18 @@
 import os
 import re
 import json
+import time
 import asyncio
 import logging
 import secrets
 import string
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional, AsyncGenerator, Dict, Any
 from contextlib import asynccontextmanager
+
+import httpx
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.security import HTTPAuthorizationCredentials
@@ -56,7 +60,7 @@ from src.rate_limiter import (
     rate_limit_exceeded_handler,
     rate_limit_endpoint,
 )
-from src.constants import CLAUDE_MODELS, CLAUDE_TOOLS, DEFAULT_ALLOWED_TOOLS
+from src.constants import CLAUDE_MODELS, CLAUDE_TOOLS, DEFAULT_ALLOWED_TOOLS, MODELS_CACHE_TTL_SECONDS
 from src.connection_tracker import connection_tracker
 
 # Load environment variables
@@ -919,21 +923,80 @@ async def anthropic_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Models cache for dynamic fetching from Anthropic API
+_models_cache: Dict[str, Any] = {"data": None, "expires_at": 0.0}
+
+
+async def _fetch_anthropic_models() -> Optional[list]:
+    """Fetch models from Anthropic API. Returns None on failure or if no API key."""
+    # Check cache first
+    if _models_cache["data"] and time.time() < _models_cache["expires_at"]:
+        return _models_cache["data"]
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                params={"limit": 100},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            models = []
+            for m in data.get("data", []):
+                created = 0
+                if m.get("created_at"):
+                    try:
+                        dt = datetime.fromisoformat(m["created_at"].replace("Z", "+00:00"))
+                        created = int(dt.timestamp())
+                    except (ValueError, TypeError):
+                        pass
+                models.append(
+                    {
+                        "id": m["id"],
+                        "object": "model",
+                        "created": created,
+                        "owned_by": "anthropic",
+                    }
+                )
+
+            _models_cache["data"] = models
+            _models_cache["expires_at"] = time.time() + MODELS_CACHE_TTL_SECONDS
+            logger.info(f"Fetched {len(models)} models from Anthropic API (cached for {MODELS_CACHE_TTL_SECONDS}s)")
+            return models
+    except Exception as e:
+        logger.warning(f"Failed to fetch models from Anthropic API: {e}")
+        return None
+
+
 @app.get("/v1/models")
 async def list_models(
     request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ):
-    """List available models."""
+    """List available models. Fetches dynamically from Anthropic API if ANTHROPIC_API_KEY is set, otherwise uses static list."""
     # Check FastAPI API key if configured
     await verify_api_key(request, credentials)
 
-    # Use constants for single source of truth
+    # Try dynamic fetch first, fall back to static list
+    dynamic_models = await _fetch_anthropic_models()
+    if dynamic_models is not None:
+        return {"object": "list", "data": dynamic_models, "source": "api"}
+
     return {
         "object": "list",
         "data": [
-            {"id": model_id, "object": "model", "owned_by": "anthropic"}
+            {"id": model_id, "object": "model", "created": 0, "owned_by": "anthropic"}
             for model_id in CLAUDE_MODELS
         ],
+        "source": "static",
     }
 
 

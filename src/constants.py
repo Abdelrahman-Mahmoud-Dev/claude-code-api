@@ -65,26 +65,25 @@ DEFAULT_DISALLOWED_TOOLS = [
     "WebSearch",  # External network access
 ]
 
-# Claude Models
-# Models supported by Claude Agent SDK (as of November 2025)
-# NOTE: Claude Agent SDK only supports Claude 4+ models, not Claude 3.x
+# Claude Models (static fallback list)
+# Used when ANTHROPIC_API_KEY is not available to fetch models dynamically.
+# When ANTHROPIC_API_KEY is set, models are fetched from Anthropic API instead.
 CLAUDE_MODELS = [
-    # Claude 4.5 Family (Latest - Fall 2025) - RECOMMENDED
-    "claude-opus-4-5-20250929",  # Latest Opus 4.5 - Most capable
+    # Claude 4.6 Family (Latest - February 2026)
+    "claude-opus-4-6-20260204",
+    # Claude 4.5 Family (Fall 2025) - RECOMMENDED
+    "claude-opus-4-5-20250929",
     "claude-sonnet-4-5-20250929",  # Recommended - best coding model
     "claude-haiku-4-5-20251001",  # Fast & cheap
     # Claude 4.1
-    "claude-opus-4-1-20250805",  # Upgraded Opus 4
+    "claude-opus-4-1-20250805",
     # Claude 4.0 Family (Original - May 2025)
     "claude-opus-4-20250514",
     "claude-sonnet-4-20250514",
-    # Claude 3.x Family - NOT SUPPORTED by Claude Agent SDK
-    # These models work with Anthropic API but NOT with Claude Code
-    # Uncomment only if using direct Anthropic API (not Claude Agent SDK)
-    # "claude-3-7-sonnet-20250219",
-    # "claude-3-5-sonnet-20241022",
-    # "claude-3-5-haiku-20241022",
 ]
+
+# Models cache TTL (seconds) - how long to cache Anthropic API models response
+MODELS_CACHE_TTL_SECONDS = int(os.getenv("MODELS_CACHE_TTL", "3600"))  # 1 hour default
 
 # Default model (recommended for most use cases)
 # Can be overridden via DEFAULT_MODEL environment variable
