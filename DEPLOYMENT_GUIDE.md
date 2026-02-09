@@ -105,7 +105,6 @@ Paste:
 
 ```env
 CLAUDE_AUTH_METHOD=cli
-API_KEY=your-secure-api-key-here
 PORT=9514
 CLAUDE_WRAPPER_HOST=0.0.0.0
 MAX_TIMEOUT=600000
@@ -113,11 +112,18 @@ CORS_ORIGINS=["https://ai.yourdomain.com"]
 DEFAULT_MODEL=claude-sonnet-4-5-20250929
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_CHAT_PER_MINUTE=10
+
+# API Endpoint Protection (OPTIONAL - separate from Claude auth!)
+# If not set → anyone can call your API (like running locally without a key)
+# If set → every request needs: Authorization: Bearer <your-key>
+# API_KEY=your-secure-api-key-here
 ```
 
 Save: **Ctrl+O** → **Enter** → **Ctrl+X**
 
-> **Note:** If using API key auth instead of CLI, replace `CLAUDE_AUTH_METHOD=cli` with:
+> **Note:** `API_KEY` is **optional** endpoint protection for YOUR server. It is NOT the Claude/Anthropic API key. If you don't set it, the API works without authentication (like running locally).
+
+> **Note:** If using Anthropic API key auth instead of CLI, replace `CLAUDE_AUTH_METHOD=cli` with:
 > ```env
 > ANTHROPIC_API_KEY=sk-ant-your-key-here
 > ```
@@ -134,6 +140,17 @@ claude auth login
 - Login with your Claude account
 - Copy the token → paste it in the terminal
 - Credentials are saved to `~/.claude/`
+
+**Important:** Verify that `~/.claude/` is owned by the correct user (not root):
+
+```bash
+ls -la ~/.claude/
+
+# If owned by root, fix it:
+sudo chown -R $(whoami):$(whoami) ~/.claude/
+```
+
+> **Common issue:** If Claude CLI was installed with `sudo`, the `~/.claude/` directory may be owned by `root`, causing "Permission denied" errors. Always fix ownership before proceeding.
 
 ---
 
@@ -347,6 +364,26 @@ Make sure your domain DNS A record points to the VPS IP:
 dig ai.yourdomain.com +short
 # Should return your VPS IP
 ```
+
+### Permission denied on `~/.claude/`
+
+If `claude auth status` fails with `EACCES: permission denied`:
+
+```bash
+# Check ownership
+ls -la ~/.claude/
+
+# If owned by root, fix it:
+sudo chown -R $(whoami):$(whoami) ~/.claude/
+
+# Then re-login
+claude auth login
+
+# Restart container
+docker restart claude-code-api
+```
+
+> This happens when Claude CLI was installed or first run with `sudo`, creating `~/.claude/` as root.
 
 ### Auth token expired
 
